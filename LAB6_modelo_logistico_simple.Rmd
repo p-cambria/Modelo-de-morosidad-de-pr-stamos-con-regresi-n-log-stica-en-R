@@ -1,0 +1,355 @@
+---
+title: "Laboratorio 6: Regresión logística - Dataset HMEQ"
+author: "Pablo Cambria"
+date: "`r format(Sys.Date(), '%d/%m/%Y')`"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+    theme: flatly
+    code_folding: hide
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+options(scipen = 999)
+set.seed(123)
+```
+
+# Objetivo
+
+Construir y evaluar un modelo de regresión logística para predecir la morosidad de préstamos. La variable `BAD` toma el valor de `0` cuando el préstamo no es moroso y `1` cuando es moroso.
+
+# Declaración de uso de inteligencia artificial
+
+Para esta actividad se utilizó la herramienta de inteligencia artificial ChatGPT, modelo GPT-5.5 High, únicamente para desarrollar y organizar el documento R Markdown. La IA no se utilizó para importar, limpiar ni desarrollar el análisis exploratorio de los datos; tampoco se utilizó para elegir las variables ni ajustar el modelo.
+
+# Librerías e importación de datos
+
+```{r instalar-paquetes, eval=FALSE}
+install.packages(c("ggplot2", "caret", "ROCR"))
+```
+
+```{r librerias}
+library(ggplot2)
+library(caret)
+library(ROCR)
+```
+
+```{r importar-datos}
+prestamos <- read.csv(
+  "hmeq.csv",
+  stringsAsFactors = FALSE,
+  na.strings = c("", "NA")
+)
+
+str(prestamos)
+summary(prestamos)
+```
+
+# Selección y análisis exploratorio de variables
+
+```{r preparar-datos}
+predictores <- c(
+  "LOAN", "MORTDUE", "VALUE", "JOB", "DEROG",
+  "DELINQ", "CLAGE", "NINQ", "CLNO", "DEBTINC"
+)
+
+variables_modelo <- c("BAD", predictores)
+
+# Se conservan todos los préstamos con BAD conocido.
+# NO se usa complete.cases() para crear el dataset final.
+datos <- prestamos[!is.na(prestamos$BAD), variables_modelo]
+datos$BAD <- as.integer(datos$BAD)
+
+datos$JOB <- trimws(as.character(datos$JOB))
+datos$JOB[datos$JOB == ""] <- NA
+
+table(datos$BAD)
+prop.table(table(datos$BAD))
+```
+
+```{r grafico-bad, fig.width=7, fig.height=5}
+ggplot(datos, aes(x = factor(BAD))) +
+  geom_bar() +
+  labs(
+    title = "Distribución de la variable BAD",
+    x = "BAD: 0 = no moroso; 1 = moroso",
+    y = "Cantidad de préstamos"
+  ) +
+  theme_minimal()
+```
+
+```{r exploracion-variables, fig.width=7, fig.height=5}
+# Se utiliza un solo gráfico por figura para evitar el error:
+# Error in plot.new() : figure margins too large
+par(mfrow = c(1, 1), mar = c(4, 4, 2, 1))
+
+hist(datos$LOAN,
+     breaks = 30,
+     main = "Histograma de LOAN",
+     xlab = "Monto del préstamo")
+
+boxplot(LOAN ~ BAD,
+        data = datos,
+        main = "LOAN según BAD",
+        xlab = "BAD (0 = no moroso; 1 = moroso)",
+        ylab = "Monto del préstamo",
+        names = c("0", "1"))
+
+hist(datos$MORTDUE[!is.na(datos$MORTDUE)],
+     breaks = 30,
+     main = "Histograma de MORTDUE",
+     xlab = "Saldo pendiente de hipoteca")
+
+boxplot(MORTDUE ~ BAD,
+        data = datos,
+        main = "MORTDUE según BAD",
+        xlab = "BAD (0 = no moroso; 1 = moroso)",
+        ylab = "Saldo pendiente de hipoteca",
+        names = c("0", "1"))
+
+hist(datos$DEBTINC[!is.na(datos$DEBTINC)],
+     breaks = 30,
+     main = "Histograma de DEBTINC",
+     xlab = "Relación deuda / ingreso")
+
+boxplot(DEBTINC ~ BAD,
+        data = datos,
+        main = "DEBTINC según BAD",
+        xlab = "BAD (0 = no moroso; 1 = moroso)",
+        ylab = "Relación deuda / ingreso",
+        names = c("0", "1"))
+```
+
+```{r grafico-job, fig.width=7, fig.height=5}
+ggplot(datos, aes(x = JOB, fill = factor(BAD))) +
+  geom_bar(position = "fill") +
+  labs(
+    title = "Proporción de morosidad según ocupación",
+    x = "Ocupación",
+    y = "Proporción",
+    fill = "BAD"
+  ) +
+  theme_minimal()
+```
+
+```{r resumen-numericas}
+summary(datos[, c("LOAN", "MORTDUE", "VALUE", "DEROG", "DELINQ",
+                 "CLAGE", "NINQ", "CLNO", "DEBTINC")])
+```
+
+## Diagnóstico de valores faltantes
+
+```{r valores-faltantes}
+tabla_faltantes <- data.frame(
+  Variable = predictores,
+  NA_BAD_0 = sapply(predictores, function(v) {
+    round(mean(is.na(datos[[v]][datos$BAD == 0])) * 100, 2)
+  }),
+  NA_BAD_1 = sapply(predictores, function(v) {
+    round(mean(is.na(datos[[v]][datos$BAD == 1])) * 100, 2)
+  })
+)
+
+tabla_faltantes
+
+# Este bloque solo demuestra el sesgo generado por complete.cases().
+# No se utilizará para crear el dataset final.
+casos_completos <- complete.cases(datos[, variables_modelo])
+
+tabla_conservacion <- prop.table(
+  table(BAD = datos$BAD, Caso_completo = casos_completos),
+  margin = 1
+) * 100
+
+round(tabla_conservacion, 2)
+
+prop.table(table(datos$BAD))
+prop.table(table(datos$BAD[casos_completos]))
+```
+
+La eliminación de registros incompletos cambia la distribución de `BAD`. Esto ocurre principalmente porque `DEBTINC` presenta muchos más valores faltantes entre los préstamos morosos. Por esta razón, se imputarán los faltantes en lugar de eliminar las filas.
+
+# División de los datos y tratamiento de faltantes
+
+```{r division-entrenamiento-prueba}
+set.seed(123)
+
+indice_train <- createDataPartition(
+  datos$BAD,
+  p = 0.70,
+  list = FALSE
+)
+
+training_set <- datos[indice_train, ]
+test_set <- datos[-indice_train, ]
+
+table(training_set$BAD)
+table(test_set$BAD)
+prop.table(table(training_set$BAD))
+prop.table(table(test_set$BAD))
+```
+
+```{r imputacion}
+variables_numericas <- c(
+  "LOAN", "MORTDUE", "VALUE", "DEROG",
+  "DELINQ", "CLAGE", "NINQ", "CLNO", "DEBTINC"
+)
+
+# Se identifican las variables numéricas con NA en entrenamiento.
+variables_con_na <- variables_numericas[
+  colSums(is.na(training_set[, variables_numericas])) > 0
+]
+
+# Se crean indicadores de NA antes de imputar.
+for (v in variables_con_na) {
+  training_set[[paste0(v, "_NA")]] <- as.integer(is.na(training_set[[v]]))
+  test_set[[paste0(v, "_NA")]] <- as.integer(is.na(test_set[[v]]))
+}
+
+indicadores_na <- paste0(variables_con_na, "_NA")
+
+# Las medianas se calculan solo con entrenamiento y se aplican a prueba.
+for (v in variables_numericas) {
+  mediana_train <- median(training_set[[v]], na.rm = TRUE)
+
+  training_set[[v]][is.na(training_set[[v]])] <- mediana_train
+  test_set[[v]][is.na(test_set[[v]])] <- mediana_train
+}
+
+# JOB: los faltantes se convierten en una categoría adicional.
+training_set$JOB[is.na(training_set$JOB)] <- "No_informado"
+test_set$JOB[is.na(test_set$JOB)] <- "No_informado"
+
+niveles_job <- sort(unique(c(training_set$JOB, "No_informado")))
+test_set$JOB[!(test_set$JOB %in% niveles_job)] <- "No_informado"
+
+training_set$JOB <- factor(training_set$JOB, levels = niveles_job)
+test_set$JOB <- factor(test_set$JOB, levels = niveles_job)
+
+# Confirmar que no existen NA en las variables que utilizará el modelo.
+colSums(is.na(training_set[, c("BAD", predictores, indicadores_na)]))
+colSums(is.na(test_set[, c("BAD", predictores, indicadores_na)]))
+```
+
+# Construcción del modelo de regresión logística
+
+```{r modelo-logistico}
+formula_modelo <- as.formula(
+  paste("BAD ~", paste(c(predictores, indicadores_na), collapse = " + "))
+)
+
+logitmod <- glm(
+  formula_modelo,
+  data = training_set,
+  family = binomial()
+)
+
+summary(logitmod)
+drop1(logitmod, test = "Chisq")
+```
+
+# Predicción y evaluación del modelo
+
+```{r prediccion}
+test_set$pred <- predict(
+  logitmod,
+  newdata = test_set,
+  type = "response"
+)
+
+# El corte de 0.50 se usa como punto de referencia principal.
+corte_final <- 0.50
+
+test_set$y_pred_num <- ifelse(test_set$pred >= corte_final, 1, 0)
+test_set$y_pred <- factor(test_set$y_pred_num, levels = c(0, 1))
+test_set$BAD_factor <- factor(test_set$BAD, levels = c(0, 1))
+
+CM <- confusionMatrix(
+  data = test_set$y_pred,
+  reference = test_set$BAD_factor,
+  positive = "1"
+)
+
+CM
+```
+
+```{r comparar-cortes}
+# Comparación de cortes: bajar el corte suele subir la sensibilidad,
+# pero reduce la especificidad y la precisión.
+calcular_metricas <- function(corte) {
+  prediccion <- factor(
+    ifelse(test_set$pred >= corte, 1, 0),
+    levels = c(0, 1)
+  )
+
+  cm <- confusionMatrix(
+    data = prediccion,
+    reference = test_set$BAD_factor,
+    positive = "1"
+  )
+
+  data.frame(
+    Corte = corte,
+    Accuracy = as.numeric(cm$overall["Accuracy"]),
+    Sensitivity = as.numeric(cm$byClass["Sensitivity"]),
+    Specificity = as.numeric(cm$byClass["Specificity"]),
+    Precision = as.numeric(cm$byClass["Pos Pred Value"]),
+    F1_Score = as.numeric(cm$byClass["F1"]),
+    Balanced_Accuracy = as.numeric(cm$byClass["Balanced Accuracy"])
+  )
+}
+
+tabla_cortes <- do.call(
+  rbind,
+  lapply(c(0.10, 0.30, 0.50, 0.60), calcular_metricas)
+)
+
+tabla_cortes[, 2:ncol(tabla_cortes)] <- round(
+  tabla_cortes[, 2:ncol(tabla_cortes)],
+  3
+)
+
+tabla_cortes
+```
+
+```{r curva-roc, fig.width=7, fig.height=5}
+pred1 <- prediction(
+  predictions = test_set$pred,
+  labels = test_set$BAD
+)
+
+perf <- performance(pred1, "tpr", "fpr")
+auc <- as.numeric(performance(pred1, "auc")@y.values[[1]])
+
+plot(
+  perf,
+  main = paste("Curva ROC - AUC =", round(auc, 3)),
+  lwd = 2
+)
+abline(a = 0, b = 1, lty = 2)
+```
+
+```{r resumen-metricas}
+resumen_metricas <- data.frame(
+  Punto_de_corte = corte_final,
+  AUC = round(auc, 3),
+  Accuracy = round(as.numeric(CM$overall["Accuracy"]), 3),
+  Sensitivity = round(as.numeric(CM$byClass["Sensitivity"]), 3),
+  Specificity = round(as.numeric(CM$byClass["Specificity"]), 3),
+  Precision = round(as.numeric(CM$byClass["Pos Pred Value"]), 3),
+  F1_Score = round(as.numeric(CM$byClass["F1"]), 3),
+  Balanced_Accuracy = round(as.numeric(CM$byClass["Balanced Accuracy"]), 3)
+)
+
+resumen_metricas
+```
+
+# Conclusión
+
+La limpieza mediante `complete.cases()` generaba un sesgo, porque eliminaba una proporción elevada de casos morosos debido a los valores nulos, especialmente en `DEBTINC`. La imputación por mediana y la inclusión de indicadores de ausencia permiten conservar todos los préstamos con `BAD` conocido y reducir ese problema.
+
+El punto de corte no hace que la muestra sea más equilibrada; modifica la cantidad de préstamos clasificados como morosos. Un corte menor aumenta la sensibilidad, es decir, detecta más morosos, pero reduce la especificidad y aumenta los falsos positivos. Por tanto, la selección del corte debe considerar las métricas observadas y el costo que tendría para una entidad financiera no detectar un préstamo moroso.

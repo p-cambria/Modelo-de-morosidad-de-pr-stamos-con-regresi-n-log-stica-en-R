@@ -1,0 +1,1 @@
+# Modelo-de-morosidad-de-pr-stamos-con-regresi-n-log-stica-en-R
